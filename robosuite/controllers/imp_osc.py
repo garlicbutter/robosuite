@@ -13,95 +13,21 @@ IMPEDANCE_MODES = {"fixed", "variable", "variable_kp"}
 
 class ImpedanceOperationalSpaceController(Controller):
     """
-    Controller for controlling robot arm via operational space control. Allows position and / or orientation control
-    of the robot's end effector. For detailed information as to the mathematical foundation for this controller, please
-    reference http://khatib.stanford.edu/publications/pdfs/Khatib_1987_RA.pdf
+    It's based on the default osc controller from robosuite.
+    We implemented impedance control on top of it.
+    The theory based on the paper by Valency: https://doi.org/10.1115/1.1590685
+    Also some code is adapted from shirkozlovsky's code.
+    
+    Addtional Args from OSC:
+                    
+                    impedance_stiffness: a tupe that contains the impedance model stifness coefficients.
+                                        the length should be 6 and it corresponds to stiffness in the direction of (x, y, z, ax, ay, az)
 
-    NOTE: Control input actions can either be taken to be relative to the current position / orientation of the
-    end effector or absolute values. In either case, a given action to this controller is assumed to be of the form:
-    (x, y, z, ax, ay, az) if controlling pos and ori or simply (x, y, z) if only controlling pos
+                    impedance_damping: a matrix that contains the impedance model damping coefficients.
+                                        the length should be 6 and it corresponds to damping in the direction of (x, y, z, ax, ay, az)
 
-    Args:
-        sim (MjSim): Simulator instance this controller will pull robot state updates from
-
-        eef_name (str): Name of controlled robot arm's end effector (from robot XML)
-
-        joint_indexes (dict): Each key contains sim reference indexes to relevant robot joint information, namely:
-
-            :`'joints'`: list of indexes to relevant robot joints
-            :`'qpos'`: list of indexes to relevant robot joint positions
-            :`'qvel'`: list of indexes to relevant robot joint velocities
-
-        actuator_range (2-tuple of array of float): 2-Tuple (low, high) representing the robot joint actuator range
-
-        input_max (float or Iterable of float): Maximum above which an inputted action will be clipped. Can be either be
-            a scalar (same value for all action dimensions), or a list (specific values for each dimension). If the
-            latter, dimension should be the same as the control dimension for this controller
-
-        input_min (float or Iterable of float): Minimum below which an inputted action will be clipped. Can be either be
-            a scalar (same value for all action dimensions), or a list (specific values for each dimension). If the
-            latter, dimension should be the same as the control dimension for this controller
-
-        output_max (float or Iterable of float): Maximum which defines upper end of scaling range when scaling an input
-            action. Can be either be a scalar (same value for all action dimensions), or a list (specific values for
-            each dimension). If the latter, dimension should be the same as the control dimension for this controller
-
-        output_min (float or Iterable of float): Minimum which defines upper end of scaling range when scaling an input
-            action. Can be either be a scalar (same value for all action dimensions), or a list (specific values for
-            each dimension). If the latter, dimension should be the same as the control dimension for this controller
-
-        kp (float or Iterable of float): positional gain for determining desired torques based upon the pos / ori error.
-            Can be either be a scalar (same value for all action dims), or a list (specific values for each dim)
-
-        damping_ratio (float or Iterable of float): used in conjunction with kp to determine the velocity gain for
-            determining desired torques based upon the joint pos errors. Can be either be a scalar (same value for all
-            action dims), or a list (specific values for each dim)
-
-        impedance_mode (str): Impedance mode with which to run this controller. Options are {"fixed", "variable",
-            "variable_kp"}. If "fixed", the controller will have fixed kp and damping_ratio values as specified by the
-            @kp and @damping_ratio arguments. If "variable", both kp and damping_ratio will now be part of the
-            controller action space, resulting in a total action space of (6 or 3) + 6 * 2. If "variable_kp", only kp
-            will become variable, with damping_ratio fixed at 1 (critically damped). The resulting action space will
-            then be (6 or 3) + 6.
-
-        kp_limits (2-list of float or 2-list of Iterable of floats): Only applicable if @impedance_mode is set to either
-            "variable" or "variable_kp". This sets the corresponding min / max ranges of the controller action space
-            for the varying kp values. Can be either be a 2-list (same min / max for all kp action dims), or a 2-list
-            of list (specific min / max for each kp dim)
-
-        damping_ratio_limits (2-list of float or 2-list of Iterable of floats): Only applicable if @impedance_mode is
-            set to "variable". This sets the corresponding min / max ranges of the controller action space for the
-            varying damping_ratio values. Can be either be a 2-list (same min / max for all damping_ratio action dims),
-            or a 2-list of list (specific min / max for each damping_ratio dim)
-
-        policy_freq (int): Frequency at which actions from the robot policy are fed into this controller
-
-        position_limits (2-list of float or 2-list of Iterable of floats): Limits (m) below and above which the
-            magnitude of a calculated goal eef position will be clipped. Can be either be a 2-list (same min/max value
-            for all cartesian dims), or a 2-list of list (specific min/max values for each dim)
-
-        orientation_limits (2-list of float or 2-list of Iterable of floats): Limits (rad) below and above which the
-            magnitude of a calculated goal eef orientation will be clipped. Can be either be a 2-list
-            (same min/max value for all joint dims), or a 2-list of list (specific min/mx values for each dim)
-
-        interpolator_pos (Interpolator): Interpolator object to be used for interpolating from the current position to
-            the goal position during each timestep between inputted actions
-
-        interpolator_ori (Interpolator): Interpolator object to be used for interpolating from the current orientation
-            to the goal orientation during each timestep between inputted actions
-
-        control_ori (bool): Whether inputted actions will control both pos and ori or exclusively pos
-        
-        control_delta (bool): Whether to control the robot using delta or absolute commands (where absolute commands
-            are taken in the world coordinate frame)
-
-        uncouple_pos_ori (bool): Whether to decouple torques meant to control pos and torques meant to control ori
-
-        **kwargs: Does nothing; placeholder to "sink" any additional arguments so that instantiating this controller
-            via an argument dict that has additional extraneous arguments won't raise an error
-
-    Raises:
-        AssertionError: [Invalid impedance mode]
+                    impedance_inertial: a matrix that contains the impedance model inertial coefficients.
+                                        the length should be 6 and it corresponds to inertial in the direction of (x, y, z, ax, ay, az)
     """
 
     def __init__(self,
@@ -114,6 +40,9 @@ class ImpedanceOperationalSpaceController(Controller):
                  output_max=(0.05, 0.05, 0.05, 0.5, 0.5, 0.5),
                  output_min=(-0.05, -0.05, -0.05, -0.5, -0.5, -0.5),
                  kp=150,
+                 impedance_stiffness=None,
+                 impedance_damping=None,
+                 impedance_inertial=None,
                  damping_ratio=1,
                  impedance_mode="fixed",
                  kp_limits=(0, 300),
@@ -195,6 +124,23 @@ class ImpedanceOperationalSpaceController(Controller):
 
         self.relative_ori = np.zeros(3)
         self.ori_ref = None
+
+        # impedance coefficients
+        if impedance_stiffness is not None:
+            self.impK = np.diag(np.array(impedance_stiffness))
+        else:
+            raise Exception("Can't find impedance_stiffness in the controller config")
+
+        if impedance_damping is not None:
+            self.impB = np.diag(np.array(impedance_damping))
+
+        else:
+            raise Exception("Can't find impedance_damping in the controller config")
+        
+        if impedance_inertial is not None:
+            self.impM = np.diag(np.array(impedance_inertial))
+        else:
+            raise Exception("Can't find impedance_inertial in the controller config")
 
     def set_goal(self, action, set_pos=None, set_ori=None):
         """
@@ -371,6 +317,56 @@ class ImpedanceOperationalSpaceController(Controller):
             self.ori_ref = np.array(self.ee_ori_mat)  # reference is the current orientation at start
             self.interpolator_ori.set_goal(orientation_error(self.goal_ori, self.ori_ref))  # goal is the total orientation error
             self.relative_ori = np.zeros(3)  # relative orientation always starts at 0
+
+    def _impedance_eq(self, x0, x0_d, F_int):
+        """
+        Impedance Eq: F_int-F0=K(x0-xm)+C(x0_d-xm_d)-Mxm_dd
+        Solving the impedance equation for x(k+1)=Ax(k)+Bu(k) where
+        x(k+1)=[Xm,thm,Xm_d,thm_d]
+        Args:
+            x0,x0_d - desired goal position/orientation and velocity
+            F_int - measured force/moments in [N/Nm]
+        Output:
+            xm = xm(k+1) = [xm,xm_d,xm_dd]
+        """
+        K, C, M = self.impK, self.impB, self.impM
+
+        # state space formulation
+        # X=[xm;thm;xm_d;thm_d] U=[F_int;M_int;x0;th0;x0d;th0d]
+        A_1 = np.concatenate((np.zeros([6, 6], dtype=int), np.identity(6)), axis=1)
+        A_2 = np.concatenate((np.dot(-np.linalg.pinv(M), K), np.dot(-np.linalg.pinv(M), C)), axis=1)
+        A_temp = np.concatenate((A_1, A_2), axis=0)
+
+        B_1 = np.zeros([6, 18], dtype=int)
+        B_2 = np.concatenate((np.linalg.pinv(M), np.dot(np.linalg.pinv(M), K),
+                            np.dot(np.linalg.pinv(M), C)), axis=1)
+        B_temp = np.concatenate((B_1, B_2), axis=0)
+
+        # discrete state space A, B matrices
+        A_d = expm(A_temp * dt)
+        B_d = np.dot(np.dot(np.linalg.pinv(A_temp), (A_d - np.identity(A_d.shape[0]))), B_temp)
+
+        # defining goal vector of position/ velocity inside the hole
+        X0 = np.concatenate((x0, th0), axis=0).reshape(6, 1)  # const
+        X0d = np.concatenate((x0_d, th0_d), axis=0).reshape(6, 1)  # const
+
+        # impedance model xm is initialized to initial position of the EEF and modified by force feedback
+        xm = xm_pose[:3].reshape(3, 1)
+        thm = xm_pose[3:].reshape(3, 1)
+        xm_d = xmd_pose[:3].reshape(3, 1)
+        thm_d = xmd_pose[3:].reshape(3, 1)
+
+        # State Space vectors
+        X = np.concatenate((xm, thm, xm_d, thm_d), axis=0)  # 12x1 column vector
+        zero_arr = np.array([0.0, 0.0, 0.0]).reshape(3, 1)
+        # U = np.concatenate((zero_arr, zero_arr, x0, th0, zero_arr, zero_arr), axis=0)
+        U = np.concatenate((F0 - F_int, x0, th0, x0_d, th0_d), axis=0).reshape(18, 1)
+
+        # discrete state solution X(k+1)=Ad*X(k)+Bd*U(k)
+        X_nex = np.dot(A_d, X) + np.dot(B_d, U)
+        # X_nex = np.round(X_nex, 10)
+
+        return X_nex.reshape(12,)
 
     @property
     def control_limits(self):
