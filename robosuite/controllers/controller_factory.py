@@ -5,6 +5,7 @@ from .osc import OperationalSpaceController
 from .joint_vel import JointVelocityController
 from .joint_pos import JointPositionController
 from .joint_tor import JointTorqueController
+from .imp_osc import ImpedanceOperationalSpaceController
 from .interpolators.linear_interpolator import LinearInterpolator
 
 import json
@@ -112,6 +113,22 @@ def controller_factory(name, params):
                                           controller_freq=(1 / params["sim"].model.opt.timestep),
                                           policy_freq=params["policy_freq"],
                                           ramp_ratio=params["ramp_ratio"])
+
+    if name == "IMP_POSE":
+        ori_interpolator = None
+        if interpolator is not None:
+            interpolator.set_states(dim=3)                # EE control uses dim 3 for pos and ori each
+            ori_interpolator = deepcopy(interpolator)
+            ori_interpolator.set_states(ori="euler")
+        params["control_ori"] = True
+        return ImpedanceOperationalSpaceController(interpolator_pos=interpolator,
+                                          interpolator_ori=ori_interpolator, **params)
+
+    if name == "IMP_POSITION":
+        if interpolator is not None:
+            interpolator.set_states(dim=3)                # EE control uses dim 3 for pos
+        params["control_ori"] = False
+        return ImpedanceOperationalSpaceController(interpolator_pos=interpolator, **params)
 
     if name == "OSC_POSE":
         ori_interpolator = None
