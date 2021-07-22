@@ -35,14 +35,14 @@ class ImpedanceOperationalSpaceController(Controller):
                  eef_name,
                  joint_indexes,
                  actuator_range,
+                 impedance_stiffness,
+                 impedance_damping,
+                 impedance_inertial,
                  input_max=1,
                  input_min=-1,
                  output_max=(0.05, 0.05, 0.05, 0.5, 0.5, 0.5),
                  output_min=(-0.05, -0.05, -0.05, -0.5, -0.5, -0.5),
                  kp=150,
-                 impedance_stiffness=None,
-                 impedance_damping=None,
-                 impedance_inertial=None,
                  damping_ratio=1,
                  impedance_mode="fixed",
                  kp_limits=(0, 300),
@@ -110,6 +110,7 @@ class ImpedanceOperationalSpaceController(Controller):
 
         # control frequency
         self.control_freq = policy_freq
+        self.dt = 1 / self.control_freq
 
         # interpolator
         self.interpolator_pos = interpolator_pos
@@ -126,21 +127,19 @@ class ImpedanceOperationalSpaceController(Controller):
         self.ori_ref = None
 
         # impedance coefficients
-        if impedance_stiffness is not None:
-            self.impK = np.diag(np.array(impedance_stiffness))
-        else:
-            raise Exception("Can't find impedance_stiffness in the controller config")
+        self.impK = np.diag(np.array(impedance_stiffness))
 
-        if impedance_damping is not None:
-            self.impB = np.diag(np.array(impedance_damping))
+        self.impB = np.diag(np.array(impedance_damping))
+    
+        self.impM = np.diag(np.array(impedance_inertial))
 
-        else:
-            raise Exception("Can't find impedance_damping in the controller config")
-        
-        if impedance_inertial is not None:
-            self.impM = np.diag(np.array(impedance_inertial))
-        else:
-            raise Exception("Can't find impedance_inertial in the controller config")
+        # impedance model position
+        self.x0     = 0
+        self.x0_d   = 0
+        self.x0_dd   = 0
+
+        self.F_int  = 0
+
 
     def set_goal(self, action, set_pos=None, set_ori=None):
         """
@@ -230,64 +229,20 @@ class ImpedanceOperationalSpaceController(Controller):
         # Update state
         self.update()
 
-        desired_pos = None
-        # Only linear interpolator is currently supported
-        if self.interpolator_pos is not None:
-            # Linear case
-            if self.interpolator_pos.order == 1:
-                desired_pos = self.interpolator_pos.get_interpolated_goal()
-            else:
-                # Nonlinear case not currently supported
-                pass
-        else:
-            desired_pos = np.array(self.goal_pos)
+        # update external force on the eef
+        self.F_int = 
+        
+        # update impedance model and x0, x0_d
+        self._update_impedance_model()
 
-        if self.interpolator_ori is not None:
-            # relative orientation based on difference between current ori and ref
-            self.relative_ori = orientation_error(self.ee_ori_mat, self.ori_ref)
-
-            ori_error = self.interpolator_ori.get_interpolated_goal()
-        else:
-            desired_ori = np.array(self.goal_ori)
-            ori_error = orientation_error(desired_ori, self.ee_ori_mat)
-
-        # Compute desired force and torque based on errors
-        position_error = desired_pos - self.ee_pos
-        vel_pos_error = -self.ee_pos_vel
-
-        # F_r = kp * pos_err + kd * vel_err
-        desired_force = (np.multiply(np.array(position_error), np.array(self.kp[0:3]))
-                         + np.multiply(vel_pos_error, self.kd[0:3]))
-
-        vel_ori_error = -self.ee_ori_vel
-
-        # Tau_r = kp * ori_err + kd * vel_err
-        desired_torque = (np.multiply(np.array(ori_error), np.array(self.kp[3:6]))
-                          + np.multiply(vel_ori_error, self.kd[3:6]))
-
-        # Compute nullspace matrix (I - Jbar * J) and lambda matrices ((J * M^-1 * J^T)^-1)
-        lambda_full, lambda_pos, lambda_ori, nullspace_matrix = opspace_matrices(self.mass_matrix,
-                                                                                 self.J_full,
-                                                                                 self.J_pos,
-                                                                                 self.J_ori)
-
-        # Decouples desired positional control from orientation control
-        if self.uncoupling:
-            decoupled_force = np.dot(lambda_pos, desired_force)
-            decoupled_torque = np.dot(lambda_ori, desired_torque)
-            decoupled_wrench = np.concatenate([decoupled_force, decoupled_torque])
-        else:
-            desired_wrench = np.concatenate([desired_force, desired_torque])
-            decoupled_wrench = np.dot(lambda_full, desired_wrench)
-
-        # Gamma (without null torques) = J^T * F + gravity compensations
-        self.torques = np.dot(self.J_full.T, decoupled_wrench) + self.torque_compensation
-
-        # Calculate and add nullspace torques (nullspace_matrix^T * Gamma_null) to final torques
-        # Note: Gamma_null = desired nullspace pose torques, assumed to be positional joint control relative
-        #                     to the initial joint positions
-        self.torques += nullspace_torques(self.mass_matrix, nullspace_matrix,
-                                          self.initial_joint, self.joint_pos, self.joint_vel)
+        # calculate torque
+        M_inv           = np.linalg.inv(self.impM)
+        J_inv           = np.linalg.inv(self.J_full)
+        Jd_times_qd     = self.Jd_full * self.joint_vel
+        x_dd            = M_inv @ ( self.impK @ (self.x0-self.ee_pos) + self.impB @ (self.x0_d-self.ee_pos_vel) - self.F_int) 
+        self.torques    = self.mass_matrix @ J_inv @ (x_dd - Jd_times_qd)
+        self.torques    += self.torque_compensation
+        self.torques    -= self.J_full.T @ self.F_int
 
         # Always run superclass call for any cleanups at the end
         super().run_controller()
@@ -318,55 +273,17 @@ class ImpedanceOperationalSpaceController(Controller):
             self.interpolator_ori.set_goal(orientation_error(self.goal_ori, self.ori_ref))  # goal is the total orientation error
             self.relative_ori = np.zeros(3)  # relative orientation always starts at 0
 
-    def _impedance_eq(self, x0, x0_d, F_int):
+    def _update_impedance_model(self):
         """
-        Impedance Eq: F_int-F0=K(x0-xm)+C(x0_d-xm_d)-Mxm_dd
-        Solving the impedance equation for x(k+1)=Ax(k)+Bu(k) where
-        x(k+1)=[Xm,thm,Xm_d,thm_d]
-        Args:
-            x0,x0_d - desired goal position/orientation and velocity
-            F_int - measured force/moments in [N/Nm]
-        Output:
-            xm = xm(k+1) = [xm,xm_d,xm_dd]
+        Impedance Eq: F_int-F0=K(x0-xr)+B(x0_d-xr_d)-Mxm_dd
+        Solving the impedance equation and update x0, x0_d (virtual impedance model)
+                                                  xr = real value
         """
-        K, C, M = self.impK, self.impB, self.impM
-
-        # state space formulation
-        # X=[xm;thm;xm_d;thm_d] U=[F_int;M_int;x0;th0;x0d;th0d]
-        A_1 = np.concatenate((np.zeros([6, 6], dtype=int), np.identity(6)), axis=1)
-        A_2 = np.concatenate((np.dot(-np.linalg.pinv(M), K), np.dot(-np.linalg.pinv(M), C)), axis=1)
-        A_temp = np.concatenate((A_1, A_2), axis=0)
-
-        B_1 = np.zeros([6, 18], dtype=int)
-        B_2 = np.concatenate((np.linalg.pinv(M), np.dot(np.linalg.pinv(M), K),
-                            np.dot(np.linalg.pinv(M), C)), axis=1)
-        B_temp = np.concatenate((B_1, B_2), axis=0)
-
-        # discrete state space A, B matrices
-        A_d = expm(A_temp * dt)
-        B_d = np.dot(np.dot(np.linalg.pinv(A_temp), (A_d - np.identity(A_d.shape[0]))), B_temp)
-
-        # defining goal vector of position/ velocity inside the hole
-        X0 = np.concatenate((x0, th0), axis=0).reshape(6, 1)  # const
-        X0d = np.concatenate((x0_d, th0_d), axis=0).reshape(6, 1)  # const
-
-        # impedance model xm is initialized to initial position of the EEF and modified by force feedback
-        xm = xm_pose[:3].reshape(3, 1)
-        thm = xm_pose[3:].reshape(3, 1)
-        xm_d = xmd_pose[:3].reshape(3, 1)
-        thm_d = xmd_pose[3:].reshape(3, 1)
-
-        # State Space vectors
-        X = np.concatenate((xm, thm, xm_d, thm_d), axis=0)  # 12x1 column vector
-        zero_arr = np.array([0.0, 0.0, 0.0]).reshape(3, 1)
-        # U = np.concatenate((zero_arr, zero_arr, x0, th0, zero_arr, zero_arr), axis=0)
-        U = np.concatenate((F0 - F_int, x0, th0, x0_d, th0_d), axis=0).reshape(18, 1)
-
-        # discrete state solution X(k+1)=Ad*X(k)+Bd*U(k)
-        X_nex = np.dot(A_d, X) + np.dot(B_d, U)
-        # X_nex = np.round(X_nex, 10)
-
-        return X_nex.reshape(12,)
+        K, B, M     = self.impK, self.impB, self.impM
+        M_inv       = np.linalg.inv(M)
+        self.x0_dd  =  M_inv @ ( K @ (self.x0-self.ee_pos) + B @ (self.x0_d-self.ee_pos_vel) - self.F_int )
+        self.x0_d   = self.x0_dd * self.dt
+        self.x0     = self.x0_d * self.dt
 
     @property
     def control_limits(self):
@@ -396,4 +313,4 @@ class ImpedanceOperationalSpaceController(Controller):
 
     @property
     def name(self):
-        return 'OSC_' + self.name_suffix
+        return 'Impedance_OSC' + self.name_suffix
