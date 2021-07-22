@@ -230,8 +230,8 @@ class ImpedanceOperationalSpaceController(Controller):
         self.update()
 
         # update external force on the eef
-        self.F_int = 
-        
+        self.F_int = 0
+        raise(NotImplementedError)
         # update impedance model and x0, x0_d
         self._update_impedance_model()
 
