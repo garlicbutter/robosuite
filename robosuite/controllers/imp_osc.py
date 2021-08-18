@@ -6,7 +6,7 @@ import math
 
 
 # Supported impedance modes
-IMPEDANCE_MODES = {"fixed", "variable", "variable_kp"}
+IMPEDANCE_MODES = {"fixed",}
 
 # TODO: Maybe better naming scheme to differentiate between input / output min / max and pos/ori limits, etc.
 
@@ -91,7 +91,7 @@ class ImpedanceOperationalSpaceController(Controller):
         self.damping_ratio_max = self.nums2array(damping_ratio_limits[1], 6)
 
         # Verify the proposed impedance mode is supported
-        assert impedance_mode in IMPEDANCE_MODES, "Error: Tried to instantiate OSC controller for unsupported " \
+        assert impedance_mode in IMPEDANCE_MODES, "Error: Tried to instantiate IMP controller for unsupported " \
                                                   "impedance mode! Inputted impedance mode: {}, Supported modes: {}". \
             format(impedance_mode, IMPEDANCE_MODES)
 
@@ -99,10 +99,10 @@ class ImpedanceOperationalSpaceController(Controller):
         self.impedance_mode = impedance_mode
 
         # Add to control dim based on impedance_mode
-        if self.impedance_mode == "variable":
-            self.control_dim += 12
-        elif self.impedance_mode == "variable_kp":
-            self.control_dim += 6
+        # if self.impedance_mode == "variable":
+        #     self.control_dim += 12
+        # elif self.impedance_mode == "variable_kp":
+        #     self.control_dim += 6
 
         # limits
         self.position_limits = np.array(position_limits) if position_limits is not None else position_limits
@@ -138,20 +138,18 @@ class ImpedanceOperationalSpaceController(Controller):
         self.x0_d   = 0
         self.x0_dd   = 0
 
+        # external force acting on the eef
         self.F_int  = 0
 
+        # Previous Jacobian for Jd calculation
+        self.J_previous = np.zeros((6,6))
 
     def set_goal(self, action, set_pos=None, set_ori=None):
         """
-        Sets goal based on input @action. If self.impedance_mode is not "fixed", then the input will be parsed into the
-        delta values to update the goal position / pose and the kp and/or damping_ratio values to be immediately updated
-        internally before executing the proceeding control loop.
-
+        Sets goal based on input @action.
         Note that @action expected to be in the following format, based on impedance mode!
 
             :Mode `'fixed'`: [joint pos command]
-            :Mode `'variable'`: [damping_ratio values, kp values, joint pos command]
-            :Mode `'variable_kp'`: [kp values, joint pos command]
 
         Args:
             action (Iterable): Desired relative joint position goal state
@@ -162,15 +160,7 @@ class ImpedanceOperationalSpaceController(Controller):
         self.update()
 
         # Parse action based on the impedance mode, and update kp / kd as necessary
-        if self.impedance_mode == "variable":
-            damping_ratio, kp, delta = action[:6], action[6:12], action[12:]
-            self.kp = np.clip(kp, self.kp_min, self.kp_max)
-            self.kd = 2 * np.sqrt(self.kp) * np.clip(damping_ratio, self.damping_ratio_min, self.damping_ratio_max)
-        elif self.impedance_mode == "variable_kp":
-            kp, delta = action[:6], action[6:]
-            self.kp = np.clip(kp, self.kp_min, self.kp_max)
-            self.kd = 2 * np.sqrt(self.kp)  # critically damped
-        else:   # This is case "fixed"
+        if self.impedance_mode == "fixed":
             delta = action
 
         # If we're using deltas, interpret actions as such
@@ -213,6 +203,8 @@ class ImpedanceOperationalSpaceController(Controller):
             self.ori_ref = np.array(self.ee_ori_mat)  # reference is the current orientation at start
             self.interpolator_ori.set_goal(orientation_error(self.goal_ori, self.ori_ref))  # goal is the total orientation error
             self.relative_ori = np.zeros(3)  # relative orientation always starts at 0
+        
+        self.F_int = action[-3:]
 
     def run_controller(self):
         """
@@ -222,28 +214,34 @@ class ImpedanceOperationalSpaceController(Controller):
 
         A detailed overview of derivation of OSC equations can be seen at:
         http://khatib.stanford.edu/publications/pdfs/Khatib_1987_RA.pdf
-
+        
+        It's based on the default osc controller from robosuite.
+        We implemented impedance control on top of it.
+        The theory based on the paper by Valency: https://doi.org/10.1115/1.1590685
+    
         Returns:
              np.array: Command torques
         """
         # Update state
         self.update()
 
-        # update external force on the eef
-        self.F_int = 0
-        raise(NotImplementedError)
         # update impedance model and x0, x0_d
         self._update_impedance_model()
 
+        # calculate jacobian derivative
+        Jd_full = (self.J_full - self.J_previous) / self.dt
+
         # calculate torque
         M_inv           = np.linalg.inv(self.impM)
-        J_inv           = np.linalg.inv(self.J_full)
-        Jd_times_qd     = self.Jd_full * self.joint_vel
-        x_dd            = M_inv @ ( self.impK @ (self.x0-self.ee_pos) + self.impB @ (self.x0_d-self.ee_pos_vel) - self.F_int) 
-        self.torques    = self.mass_matrix @ J_inv @ (x_dd - Jd_times_qd)
+        J_inv           = np.linalg.pinv(self.J_pos) 
+        Jd_times_qd     = Jd_full @ self.joint_vel
+        x_dd            = M_inv @ ( self.impK @ (self.x0-self.ee_pos) + self.impB @ (self.x0_d-self.ee_pos_vel) - self.F_int)
+        self.torques    = self.mass_matrix @ J_inv @ (x_dd - Jd_times_qd[0:3])
         self.torques    += self.torque_compensation
-        self.torques    -= self.J_full.T @ self.F_int
+        self.torques    -= self.J_pos.T @ self.F_int
 
+        self.J_previous = self.J_full
+        
         # Always run superclass call for any cleanups at the end
         super().run_controller()
 
