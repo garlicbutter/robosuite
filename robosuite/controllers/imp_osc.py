@@ -241,7 +241,6 @@ class ImpedanceOperationalSpaceController(Controller):
         self.torques    -= self.J_pos.T @ self.F_int
 
         self.J_previous = self.J_full
-        
         # Always run superclass call for any cleanups at the end
         super().run_controller()
 
